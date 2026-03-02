@@ -1802,7 +1802,7 @@ if manage_runtimes_action:
 
         Args:
             profile: Boomi profile name (required)
-            action: One of: list, get, update, delete, attach, detach, list_attachments, restart, configure_java, create_installer_token, cloud_list, cloud_get, cloud_create, cloud_update, cloud_delete
+            action: One of: list, get, create, update, delete, attach, detach, list_attachments, restart, configure_java, create_installer_token, available_clouds, cloud_list, cloud_get, cloud_create, cloud_update, cloud_delete
             resource_id: Runtime ID (most actions) or attachment ID (detach) or cloud ID (cloud_get, cloud_update, cloud_delete)
             environment_id: Environment ID (for attach, detach, list_attachments)
             config: JSON string with action-specific parameters
@@ -1816,6 +1816,12 @@ if manage_runtimes_action:
 
             get - Get runtime by ID (no config needed):
                 resource_id="abc-123-def"
+
+            create - Create an atom (local or cloud):
+                config='{"name": "My Local Atom"}'
+                config='{"name": "My Cloud Atom", "cloud_id": "abc-123-def"}'
+                Optional: purge_history_days, force_restart_time
+                Use action='available_clouds' to find cloud IDs for cloud atoms.
 
             update - Update runtime name:
                 resource_id="abc-123-def"
@@ -1849,6 +1855,10 @@ if manage_runtimes_action:
 
             create_installer_token - Create installer token for local runtime:
                 config='{"install_type": "ATOM", "duration_minutes": 120}'
+
+            available_clouds - List Boomi-managed clouds (for cloud atom creation):
+                (no config needed - lists all available clouds)
+                config='{"name_pattern": "%US%"}'
 
             cloud_list - List private runtime clouds:
                 config='{"classification": "PROD"}'
