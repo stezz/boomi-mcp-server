@@ -1817,11 +1817,11 @@ if manage_runtimes_action:
             get - Get runtime by ID (no config needed):
                 resource_id="abc-123-def"
 
-            create - Create an atom (local or cloud):
-                config='{"name": "My Local Atom"}'
+            create - Create a cloud attachment (requires cloud_id):
                 config='{"name": "My Cloud Atom", "cloud_id": "abc-123-def"}'
                 Optional: purge_history_days, force_restart_time
-                Use action='available_clouds' to find cloud IDs for cloud atoms.
+                Use available_clouds to find Boomi-managed cloud IDs, or cloud_list for private clouds.
+                Note: Local atoms cannot be created via API — use create_installer_token instead.
 
             update - Update runtime name:
                 resource_id="abc-123-def"
@@ -1856,12 +1856,14 @@ if manage_runtimes_action:
             create_installer_token - Create installer token for local runtime:
                 config='{"install_type": "ATOM", "duration_minutes": 120}'
 
-            available_clouds - List Boomi-managed clouds (for cloud atom creation):
+            available_clouds - List Boomi-managed public clouds (PCS/DCS/MCS) your account can attach to:
                 (no config needed - lists all available clouds)
                 config='{"name_pattern": "%US%"}'
+                Use these cloud IDs with action='create' to create cloud attachments.
 
-            cloud_list - List private runtime clouds:
+            cloud_list - List private runtime clouds your account owns (requires Cloud Management privilege):
                 config='{"classification": "PROD"}'
+                For accounts that manage their own runtime clouds (enterprise feature).
 
             cloud_get - Get private runtime cloud by ID:
                 resource_id="abc-123-def"

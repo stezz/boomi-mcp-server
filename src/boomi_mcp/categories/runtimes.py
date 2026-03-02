@@ -4,7 +4,7 @@ Runtime Management MCP Tools for Boomi Platform.
 Provides 17 runtime management actions:
 - list: List runtimes with optional type/status/name filters
 - get: Get single runtime details
-- create: Create an atom (local or cloud)
+- create: Create a cloud attachment (requires cloud_id from available_clouds or cloud_list)
 - update: Update runtime name
 - delete: Delete runtime (permanent)
 - attach: Attach runtime to environment
@@ -13,8 +13,8 @@ Provides 17 runtime management actions:
 - restart: Restart runtime
 - configure_java: Upgrade or rollback Java version
 - create_installer_token: Create installer token for new runtime installation
-- available_clouds: List Boomi-managed clouds available for cloud atom creation
-- cloud_list: List private runtime clouds
+- available_clouds: List Boomi-managed public clouds (PCS/DCS/MCS) your account can use for cloud attachments
+- cloud_list: List private runtime clouds your account owns (requires Cloud Management privilege)
 - cloud_get: Get private runtime cloud details
 - cloud_create: Create private runtime cloud (PROD or TEST)
 - cloud_update: Update private runtime cloud settings
@@ -608,10 +608,13 @@ def _action_create_installer_token(sdk: Boomi, profile: str, **kwargs) -> Dict[s
 
 
 def _action_create(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
-    """Create an atom (local or cloud).
+    """Create a cloud attachment on a Boomi-managed or private runtime cloud.
 
-    If cloud_id is provided, creates a cloud atom on that Boomi-managed cloud.
-    Otherwise creates a local atom placeholder (requires installer for actual setup).
+    Requires cloud_id — use available_clouds to find Boomi-managed cloud IDs,
+    or cloud_list for private runtime cloud IDs.
+
+    Note: Local atoms cannot be created via API. Use create_installer_token
+    to get a token, then install the runtime manually.
     """
     name = kwargs.get("name")
     cloud_id = kwargs.get("cloud_id")
@@ -619,9 +622,17 @@ def _action_create(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
     if not name:
         return {"_success": False, "error": "config.name is required for 'create' action"}
 
-    atom_kwargs = {"name": name}
-    if cloud_id:
-        atom_kwargs["cloud_id"] = cloud_id
+    if not cloud_id:
+        return {
+            "_success": False,
+            "error": "config.cloud_id is required for 'create' action. "
+                     "The Atom CREATE API only creates cloud attachments. "
+                     "Use action='available_clouds' to find Boomi-managed cloud IDs, "
+                     "or action='cloud_list' for private runtime cloud IDs. "
+                     "For local atoms, use action='create_installer_token' instead.",
+        }
+
+    atom_kwargs = {"name": name, "cloud_id": cloud_id}
 
     for key in ("purge_history_days", "force_restart_time"):
         val = kwargs.get(key)
@@ -635,7 +646,6 @@ def _action_create(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
     try:
         result = sdk.atom.create_atom(request_body=atom_request)
     except ApiError as e:
-        # Extract Boomi's error message from the response body
         msg = ""
         resp = getattr(e, 'response', None)
         if resp:
@@ -644,16 +654,17 @@ def _action_create(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
                 msg = body.get("message", "")
         if not msg:
             msg = str(e)
-        hint = " Use action='available_clouds' to find valid cloud IDs." if cloud_id or "cloud" in msg.lower() else ""
-        return {"_success": False, "error": f"{msg}{hint}"}
+        return {
+            "_success": False,
+            "error": f"{msg} Use action='available_clouds' to find Boomi-managed cloud IDs, "
+                     f"or action='cloud_list' for private runtime cloud IDs.",
+        }
 
-    response = {
+    return {
         "_success": True,
         "runtime": _runtime_to_dict(result),
+        "note": "Cloud attachment created successfully.",
     }
-    if cloud_id:
-        response["note"] = "Cloud atom created. It will appear in the runtime list once provisioned."
-    return response
 
 
 def _action_available_clouds(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
@@ -705,7 +716,9 @@ def _action_available_clouds(sdk: Boomi, profile: str, **kwargs) -> Dict[str, An
         "_success": True,
         "clouds": clouds,
         "total_count": len(clouds),
-        "hint": "Use a cloud 'id' as cloud_id in action='create' to create a cloud atom.",
+        "hint": "Use a cloud 'id' as cloud_id in action='create' to create a cloud attachment. "
+                "These are Boomi-managed public clouds (PCS/DCS/MCS). "
+                "For private runtime clouds, use action='cloud_list' instead.",
     }
 
 
