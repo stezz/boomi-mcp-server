@@ -1850,7 +1850,7 @@ if manage_runtimes_action:
             create_installer_token - Create installer token:
                 config='{"install_type": "ATOM", "duration_minutes": 120}'
 
-        Runtime types: ATOM, MOLECULE, CLOUD, GATEWAY
+        Runtime types: ATOM, MOLECULE, CLOUD
         Install types: ATOM, MOLECULE, CLOUD, BROKER, GATEWAY
         Java versions: 8, 11, 17, 21
 

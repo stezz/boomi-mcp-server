@@ -534,7 +534,7 @@ def _action_create_installer_token(sdk: Boomi, profile: str, **kwargs) -> Dict[s
         "install_type": install_type_enum,
         "duration_minutes": duration_minutes,
     }
-    if cloud_id:
+    if install_type == "CLOUD" and cloud_id:
         token_kwargs["cloud_id"] = cloud_id
     token_request = InstallerToken(**token_kwargs)
     result = sdk.installer_token.create_installer_token(token_request)
