@@ -1,0 +1,597 @@
+"""
+Runtime Management MCP Tools for Boomi Platform.
+
+Provides 10 runtime management actions:
+- list: List runtimes with optional type/status/name filters
+- get: Get single runtime details
+- update: Update runtime name
+- delete: Delete runtime (permanent)
+- attach: Attach runtime to environment
+- detach: Detach runtime from environment
+- list_attachments: List environment-runtime attachments
+- restart: Restart runtime
+- configure_java: Upgrade or rollback Java version
+- create_installer_token: Create installer token for new runtime installation
+"""
+
+from typing import Dict, Any, Optional, List
+
+from boomi import Boomi
+from boomi.net.transport.api_error import ApiError
+from boomi.models import (
+    Atom,
+    AtomQueryConfig,
+    AtomQueryConfigQueryFilter,
+    AtomSimpleExpression,
+    AtomSimpleExpressionOperator,
+    AtomSimpleExpressionProperty,
+    EnvironmentAtomAttachment,
+    EnvironmentAtomAttachmentQueryConfig,
+    EnvironmentAtomAttachmentQueryConfigQueryFilter,
+    EnvironmentAtomAttachmentSimpleExpression,
+    EnvironmentAtomAttachmentSimpleExpressionOperator,
+    EnvironmentAtomAttachmentSimpleExpressionProperty,
+    RuntimeRestartRequest,
+    JavaUpgrade,
+    JavaRollback,
+    InstallerToken,
+    InstallType,
+)
+
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+VALID_RUNTIME_TYPES = {"ATOM", "MOLECULE", "CLOUD", "GATEWAY"}
+VALID_STATUSES = {"ONLINE", "OFFLINE"}
+VALID_INSTALL_TYPES = {"ATOM", "MOLECULE", "CLOUD", "BROKER", "GATEWAY"}
+
+JAVA_VERSIONS = {
+    '8': '1.8.0',
+    '11': '11.0',
+    '17': '17.0',
+    '21': '21.0',
+}
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+def _runtime_to_dict(runtime) -> Dict[str, Any]:
+    """Convert SDK Atom object to plain dict."""
+    result = {
+        "id": getattr(runtime, 'id_', ''),
+        "name": getattr(runtime, 'name', ''),
+        "type": getattr(runtime, 'type_', ''),
+        "status": getattr(runtime, 'status', ''),
+    }
+    # Include optional fields only when present
+    for sdk_attr, dict_key in [
+        ('host_name', 'hostname'),
+        ('current_version', 'version'),
+        ('date_installed', 'date_installed'),
+        ('date_created', 'date_created'),
+        ('created_by', 'created_by'),
+        ('description', 'description'),
+    ]:
+        val = getattr(runtime, sdk_attr, None)
+        if val and str(val) != 'N/A':
+            result[dict_key] = str(val)
+
+    capabilities = getattr(runtime, 'capabilities', None)
+    if capabilities:
+        result['capabilities'] = capabilities
+
+    return result
+
+
+def _attachment_to_dict(attachment) -> Dict[str, Any]:
+    """Convert SDK EnvironmentAtomAttachment to dict."""
+    return {
+        "id": getattr(attachment, 'id_', ''),
+        "atom_id": getattr(attachment, 'atom_id', ''),
+        "environment_id": getattr(attachment, 'environment_id', ''),
+    }
+
+
+def _query_all_runtimes(sdk: Boomi, expression=None) -> List[Dict[str, Any]]:
+    """Execute query_atom with pagination, return list of dicts."""
+    if expression:
+        query_filter = AtomQueryConfigQueryFilter(expression=expression)
+        query_config = AtomQueryConfig(query_filter=query_filter)
+    else:
+        query_config = AtomQueryConfig()
+
+    result = sdk.atom.query_atom(request_body=query_config)
+
+    runtimes = []
+    if hasattr(result, 'result') and result.result:
+        items = result.result if isinstance(result.result, list) else [result.result]
+        runtimes.extend([_runtime_to_dict(r) for r in items])
+
+    while hasattr(result, 'query_token') and result.query_token:
+        result = sdk.atom.query_more_atom(request_body=result.query_token)
+        if hasattr(result, 'result') and result.result:
+            items = result.result if isinstance(result.result, list) else [result.result]
+            runtimes.extend([_runtime_to_dict(r) for r in items])
+
+    return runtimes
+
+
+def _query_all_attachments(sdk: Boomi, expression=None) -> List[Dict[str, Any]]:
+    """Execute query_environment_atom_attachment with pagination."""
+    if expression:
+        query_filter = EnvironmentAtomAttachmentQueryConfigQueryFilter(expression=expression)
+        query_config = EnvironmentAtomAttachmentQueryConfig(query_filter=query_filter)
+    else:
+        # List all: use CONTAINS with empty string on ENVIRONMENTID
+        expression = EnvironmentAtomAttachmentSimpleExpression(
+            operator=EnvironmentAtomAttachmentSimpleExpressionOperator.CONTAINS,
+            property=EnvironmentAtomAttachmentSimpleExpressionProperty.ENVIRONMENTID,
+            argument=[""],
+        )
+        query_filter = EnvironmentAtomAttachmentQueryConfigQueryFilter(expression=expression)
+        query_config = EnvironmentAtomAttachmentQueryConfig(query_filter=query_filter)
+
+    result = sdk.environment_atom_attachment.query_environment_atom_attachment(
+        request_body=query_config
+    )
+
+    attachments = []
+    if hasattr(result, 'result') and result.result:
+        items = result.result if isinstance(result.result, list) else [result.result]
+        attachments.extend([_attachment_to_dict(a) for a in items])
+
+    while hasattr(result, 'query_token') and result.query_token:
+        result = sdk.environment_atom_attachment.query_more_environment_atom_attachment(
+            request_body=result.query_token
+        )
+        if hasattr(result, 'result') and result.result:
+            items = result.result if isinstance(result.result, list) else [result.result]
+            attachments.extend([_attachment_to_dict(a) for a in items])
+
+    return attachments
+
+
+# ============================================================================
+# Action Handlers
+# ============================================================================
+
+def _action_list(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """List runtimes with optional type/status/name filters."""
+    runtime_type = kwargs.get("runtime_type")
+    status = kwargs.get("status")
+    name_pattern = kwargs.get("name_pattern")
+
+    if runtime_type:
+        upper = runtime_type.upper()
+        if upper not in VALID_RUNTIME_TYPES:
+            return {
+                "_success": False,
+                "error": f"Invalid runtime_type: '{runtime_type}'. "
+                         f"Valid values: {', '.join(sorted(VALID_RUNTIME_TYPES))}",
+            }
+        expression = AtomSimpleExpression(
+            operator=AtomSimpleExpressionOperator.EQUALS,
+            property=AtomSimpleExpressionProperty.TYPE,
+            argument=[upper],
+        )
+    elif status:
+        upper = status.upper()
+        if upper not in VALID_STATUSES:
+            return {
+                "_success": False,
+                "error": f"Invalid status: '{status}'. "
+                         f"Valid values: {', '.join(sorted(VALID_STATUSES))}",
+            }
+        expression = AtomSimpleExpression(
+            operator=AtomSimpleExpressionOperator.EQUALS,
+            property=AtomSimpleExpressionProperty.STATUS,
+            argument=[upper],
+        )
+    elif name_pattern:
+        expression = AtomSimpleExpression(
+            operator=AtomSimpleExpressionOperator.LIKE,
+            property=AtomSimpleExpressionProperty.NAME,
+            argument=[name_pattern],
+        )
+    else:
+        expression = None
+
+    runtimes = _query_all_runtimes(sdk, expression)
+
+    return {
+        "_success": True,
+        "runtimes": runtimes,
+        "total_count": len(runtimes),
+    }
+
+
+def _action_get(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Get a single runtime by ID."""
+    resource_id = kwargs.get("resource_id")
+    if not resource_id:
+        return {"_success": False, "error": "resource_id is required for 'get' action"}
+
+    runtime = sdk.atom.get_atom(id_=resource_id)
+    return {
+        "_success": True,
+        "runtime": _runtime_to_dict(runtime),
+    }
+
+
+def _action_update(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Update runtime name (GET first to preserve required fields)."""
+    resource_id = kwargs.get("resource_id")
+    name = kwargs.get("name")
+
+    if not resource_id:
+        return {"_success": False, "error": "resource_id is required for 'update' action"}
+    if not name:
+        return {"_success": False, "error": "config.name is required for 'update' action"}
+
+    # GET current atom to preserve required fields
+    current_atom = sdk.atom.get_atom(id_=resource_id)
+
+    update_data = {
+        'id_': resource_id,
+        'name': name,
+        'purge_history_days': getattr(current_atom, 'purge_history_days', 30),
+        'purge_immediate': getattr(current_atom, 'purge_immediate', False),
+        'force_restart_time': getattr(current_atom, 'force_restart_time', 0),
+    }
+    runtime_update = Atom(**update_data)
+
+    result = sdk.atom.update_atom(id_=resource_id, request_body=runtime_update)
+
+    return {
+        "_success": True,
+        "runtime": _runtime_to_dict(result),
+    }
+
+
+def _action_delete(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Delete a runtime (permanent)."""
+    resource_id = kwargs.get("resource_id")
+    if not resource_id:
+        return {"_success": False, "error": "resource_id is required for 'delete' action"}
+
+    # Get info first for the response
+    try:
+        runtime = sdk.atom.get_atom(id_=resource_id)
+        runtime_dict = _runtime_to_dict(runtime)
+    except Exception:
+        runtime_dict = {"id": resource_id}
+
+    try:
+        sdk.atom.delete_atom(id_=resource_id)
+    except ApiError as e:
+        status = getattr(e, 'status', None)
+        if status == 409:
+            return {
+                "_success": False,
+                "error": "Runtime is attached to one or more environments. "
+                         "Detach it first using action='detach'.",
+            }
+        raise
+
+    return {
+        "_success": True,
+        "deleted_runtime": runtime_dict,
+        "warning": "Runtime deletion is permanent and cannot be undone.",
+    }
+
+
+def _action_attach(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Attach runtime to environment."""
+    resource_id = kwargs.get("resource_id")
+    environment_id = kwargs.get("environment_id")
+
+    if not resource_id:
+        return {"_success": False, "error": "resource_id (runtime_id) is required for 'attach' action"}
+    if not environment_id:
+        return {"_success": False, "error": "environment_id is required for 'attach' action"}
+
+    attachment_request = EnvironmentAtomAttachment(
+        atom_id=resource_id,
+        environment_id=environment_id,
+    )
+    result = sdk.environment_atom_attachment.create_environment_atom_attachment(
+        attachment_request
+    )
+
+    return {
+        "_success": True,
+        "attachment": _attachment_to_dict(result),
+    }
+
+
+def _action_detach(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Detach runtime from environment.
+
+    Supports two calling patterns:
+    1. resource_id=attachment_id (direct)
+    2. resource_id=runtime_id + environment_id (auto-lookup)
+    """
+    resource_id = kwargs.get("resource_id")
+    environment_id = kwargs.get("environment_id")
+
+    if not resource_id:
+        return {"_success": False, "error": "resource_id is required for 'detach' action"}
+
+    attachment_id = resource_id
+
+    # If environment_id is provided, treat resource_id as runtime_id and look up attachment
+    if environment_id:
+        expression = EnvironmentAtomAttachmentSimpleExpression(
+            operator=EnvironmentAtomAttachmentSimpleExpressionOperator.EQUALS,
+            property=EnvironmentAtomAttachmentSimpleExpressionProperty.ENVIRONMENTID,
+            argument=[environment_id],
+        )
+        attachments = _query_all_attachments(sdk, expression)
+
+        # Find the attachment matching both runtime_id and environment_id
+        matching = [a for a in attachments if a["atom_id"] == resource_id]
+        if not matching:
+            return {
+                "_success": False,
+                "error": f"No attachment found for runtime '{resource_id}' "
+                         f"in environment '{environment_id}'.",
+            }
+        attachment_id = matching[0]["id"]
+
+    sdk.environment_atom_attachment.delete_environment_atom_attachment(id_=attachment_id)
+
+    return {
+        "_success": True,
+        "detached_attachment_id": attachment_id,
+        "message": "Runtime successfully detached from environment.",
+    }
+
+
+def _action_list_attachments(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """List environment-runtime attachments with optional filters."""
+    environment_id = kwargs.get("environment_id")
+    resource_id = kwargs.get("resource_id")
+
+    if environment_id:
+        expression = EnvironmentAtomAttachmentSimpleExpression(
+            operator=EnvironmentAtomAttachmentSimpleExpressionOperator.EQUALS,
+            property=EnvironmentAtomAttachmentSimpleExpressionProperty.ENVIRONMENTID,
+            argument=[environment_id],
+        )
+    elif resource_id:
+        expression = EnvironmentAtomAttachmentSimpleExpression(
+            operator=EnvironmentAtomAttachmentSimpleExpressionOperator.EQUALS,
+            property=EnvironmentAtomAttachmentSimpleExpressionProperty.ATOMID,
+            argument=[resource_id],
+        )
+    else:
+        expression = None
+
+    attachments = _query_all_attachments(sdk, expression)
+
+    return {
+        "_success": True,
+        "attachments": attachments,
+        "total_count": len(attachments),
+    }
+
+
+def _action_restart(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Restart runtime."""
+    resource_id = kwargs.get("resource_id")
+    if not resource_id:
+        return {"_success": False, "error": "resource_id is required for 'restart' action"}
+
+    restart_request = RuntimeRestartRequest(
+        runtime_id=resource_id,
+        message="Restart initiated via MCP",
+    )
+
+    try:
+        result = sdk.runtime_restart_request.create_runtime_restart_request(
+            request_body=restart_request
+        )
+    except ApiError as e:
+        status = getattr(e, 'status', None)
+        if status == 400:
+            return {
+                "_success": False,
+                "error": "Cannot restart this runtime via API. "
+                         "Cloud runtimes are managed by Boomi and restart automatically.",
+            }
+        raise
+
+    # Handle response — may be string, object with message, or dict
+    message = "Restart command sent successfully"
+    if result:
+        if isinstance(result, str):
+            message = result if 'RuntimeRestartRequest' not in result else message
+        elif hasattr(result, 'message') and result.message:
+            message = result.message
+        elif isinstance(result, dict) and 'message' in result:
+            message = result['message']
+
+    return {
+        "_success": True,
+        "runtime_id": resource_id,
+        "message": message,
+    }
+
+
+def _action_configure_java(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Upgrade or rollback Java version on a runtime."""
+    resource_id = kwargs.get("resource_id")
+    java_action = kwargs.get("java_action")
+    target_version = kwargs.get("target_version")
+
+    if not resource_id:
+        return {"_success": False, "error": "resource_id is required for 'configure_java' action"}
+    if not java_action:
+        return {
+            "_success": False,
+            "error": "config.java_action is required ('upgrade' or 'rollback')",
+        }
+
+    java_action = java_action.lower()
+
+    if java_action == "upgrade":
+        if not target_version:
+            return {
+                "_success": False,
+                "error": "config.target_version is required for upgrade "
+                         f"(valid: {', '.join(sorted(JAVA_VERSIONS.keys()))})",
+            }
+        target_version = str(target_version)
+        if target_version not in JAVA_VERSIONS:
+            return {
+                "_success": False,
+                "error": f"Invalid target_version: '{target_version}'. "
+                         f"Valid values: {', '.join(sorted(JAVA_VERSIONS.keys()))}",
+            }
+
+        sdk_version = JAVA_VERSIONS[target_version]
+        upgrade_request = JavaUpgrade(
+            atom_id=resource_id,
+            target_version=sdk_version,
+        )
+        result = sdk.java_upgrade.create_java_upgrade(request_body=upgrade_request)
+
+        return {
+            "_success": True,
+            "runtime_id": resource_id,
+            "java_action": "upgrade",
+            "target_version": target_version,
+            "sdk_version": sdk_version,
+            "message": f"Java upgrade to {target_version} ({sdk_version}) initiated",
+        }
+
+    elif java_action == "rollback":
+        sdk.java_rollback.execute_java_rollback(id_=resource_id)
+
+        return {
+            "_success": True,
+            "runtime_id": resource_id,
+            "java_action": "rollback",
+            "message": "Java rollback initiated",
+        }
+
+    else:
+        return {
+            "_success": False,
+            "error": f"Invalid java_action: '{java_action}'. Must be 'upgrade' or 'rollback'.",
+        }
+
+
+def _action_create_installer_token(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Create installer token for new runtime installation."""
+    install_type = kwargs.get("install_type", "ATOM").upper()
+    duration_minutes = kwargs.get("duration_minutes", 60)
+
+    if install_type not in VALID_INSTALL_TYPES:
+        return {
+            "_success": False,
+            "error": f"Invalid install_type: '{install_type}'. "
+                     f"Valid values: {', '.join(sorted(VALID_INSTALL_TYPES))}",
+        }
+
+    try:
+        duration_minutes = int(duration_minutes)
+    except (TypeError, ValueError):
+        return {"_success": False, "error": f"duration_minutes must be a number, got: {duration_minutes}"}
+
+    if duration_minutes < 30 or duration_minutes > 1440:
+        return {
+            "_success": False,
+            "error": f"duration_minutes must be between 30 and 1440, got: {duration_minutes}",
+        }
+
+    install_type_enum = getattr(InstallType, install_type)
+    token_request = InstallerToken(
+        install_type=install_type_enum,
+        duration_minutes=duration_minutes,
+    )
+    result = sdk.installer_token.create_installer_token(token_request)
+
+    # Parse response — may be object, wrapped in _kwargs, or dict
+    token_data = {}
+    if hasattr(result, 'token'):
+        token_data = {
+            "token": getattr(result, 'token', ''),
+            "install_type": str(getattr(result, 'install_type', install_type)),
+            "account_id": getattr(result, 'account_id', ''),
+            "created": str(getattr(result, 'created', '')),
+            "expiration": str(getattr(result, 'expiration', '')),
+            "duration_minutes": getattr(result, 'duration_minutes', duration_minutes),
+        }
+    elif hasattr(result, '_kwargs') and 'InstallerToken' in result._kwargs:
+        raw = result._kwargs['InstallerToken']
+        token_data = {
+            "token": raw.get('@token', raw.get('token', '')),
+            "install_type": raw.get('@installType', raw.get('installType', install_type)),
+            "account_id": raw.get('@accountId', raw.get('accountId', '')),
+            "created": raw.get('@created', raw.get('created', '')),
+            "expiration": raw.get('@expiration', raw.get('expiration', '')),
+            "duration_minutes": duration_minutes,
+        }
+    elif isinstance(result, dict):
+        token_data = result
+    else:
+        token_data = {"raw_response": str(result)}
+
+    return {
+        "_success": True,
+        **token_data,
+    }
+
+
+# ============================================================================
+# Action Router
+# ============================================================================
+
+def manage_runtimes_action(
+    sdk: Boomi,
+    profile: str,
+    action: str,
+    config_data: Optional[Dict[str, Any]] = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Route to the appropriate runtime action handler."""
+    if config_data is None:
+        config_data = {}
+
+    # Merge config_data into kwargs
+    merged = {**config_data, **kwargs}
+
+    actions = {
+        "list": _action_list,
+        "get": _action_get,
+        "update": _action_update,
+        "delete": _action_delete,
+        "attach": _action_attach,
+        "detach": _action_detach,
+        "list_attachments": _action_list_attachments,
+        "restart": _action_restart,
+        "configure_java": _action_configure_java,
+        "create_installer_token": _action_create_installer_token,
+    }
+
+    handler = actions.get(action)
+    if not handler:
+        return {
+            "_success": False,
+            "error": f"Unknown action: {action}",
+            "valid_actions": list(actions.keys()),
+        }
+
+    try:
+        return handler(sdk, profile, **merged)
+    except Exception as e:
+        return {
+            "_success": False,
+            "error": f"Action '{action}' failed: {str(e)}",
+            "exception_type": type(e).__name__,
+        }

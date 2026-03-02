@@ -1557,15 +1557,16 @@ def list_capabilities_action() -> Dict[str, Any]:
         },
         "manage_runtimes": {
             "category": "Environments & Runtimes",
-            "description": "Manage Boomi runtimes (Atoms, Molecules, Clouds)",
-            "actions": ["list", "get", "attach", "detach", "restart", "configure_java", "create_installer_token"],
+            "description": "Manage Boomi runtimes (Atoms, Molecules, Clouds, Gateways), attachments, restart, Java, and installer tokens",
+            "actions": ["list", "get", "update", "delete", "attach", "detach", "list_attachments", "restart", "configure_java", "create_installer_token"],
             "read_only": False,
-            "implemented": False,
+            "implemented": True,
             "parameters": {
                 "profile": "str (required)",
                 "action": "str (required)",
-                "runtime_id": "str (optional)",
-                "environment_id": "str (optional) — for attach/detach",
+                "resource_id": "str (optional) — runtime ID or attachment ID",
+                "environment_id": "str (optional) — for attach/detach/list_attachments",
+                "config": "JSON str (optional)",
             },
             "sdk_examples_covered": [
                 "manage_runtimes.py",
