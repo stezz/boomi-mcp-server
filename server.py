@@ -181,6 +181,14 @@ except ImportError as e:
     print(f"[WARNING] Failed to import environment tools: {e}")
     manage_environments_action = None
 
+# --- Runtime Tools ---
+try:
+    from boomi_mcp.categories.runtimes import manage_runtimes_action
+    print(f"[INFO] Runtime tools loaded successfully")
+except ImportError as e:
+    print(f"[WARNING] Failed to import runtime tools: {e}")
+    manage_runtimes_action = None
+
 
 def put_secret(sub: str, profile: str, payload: Dict[str, str]):
     """Store credentials for a user profile."""
@@ -1780,6 +1788,118 @@ if manage_environments_action:
     print("[INFO] Environment management tool registered successfully (1 consolidated tool)")
 
 
+# --- Runtime Management MCP Tools ---
+if manage_runtimes_action:
+    @mcp.tool()
+    def manage_runtimes(
+        profile: str,
+        action: str,
+        resource_id: str = None,
+        environment_id: str = None,
+        config: str = None,
+    ):
+        """Manage Boomi runtimes (Atoms, Molecules, Clouds, Gateways), attachments, and provisioning.
+
+        Args:
+            profile: Boomi profile name (required)
+            action: One of: list, get, update, delete, attach, detach, list_attachments, restart, configure_java, create_installer_token
+            resource_id: Runtime ID (most actions) or attachment ID (detach)
+            environment_id: Environment ID (for attach, detach, list_attachments)
+            config: JSON string with action-specific parameters
+
+        Actions and config examples:
+
+            list - List all runtimes, optional filters:
+                config='{"runtime_type": "ATOM"}'
+                config='{"status": "ONLINE"}'
+                config='{"name_pattern": "%prod%"}'
+
+            get - Get runtime by ID (no config needed):
+                resource_id="abc-123-def"
+
+            update - Update runtime name:
+                resource_id="abc-123-def"
+                config='{"name": "Production Atom"}'
+
+            delete - Delete runtime (permanent!):
+                resource_id="abc-123-def"
+
+            attach - Attach runtime to environment:
+                resource_id="abc-123-def"           (runtime_id)
+                environment_id="env-456-ghi"
+
+            detach - Detach runtime from environment:
+                resource_id="attachment-789-jkl"    (attachment_id)
+                OR:
+                resource_id="abc-123-def"           (runtime_id)
+                environment_id="env-456-ghi"        (auto-lookup attachment_id)
+
+            list_attachments - List environment-runtime attachments:
+                environment_id="env-456-ghi"        (all runtimes in this env)
+                resource_id="abc-123-def"           (all envs for this runtime)
+                (neither = list all attachments)
+
+            restart - Restart runtime:
+                resource_id="abc-123-def"
+
+            configure_java - Upgrade or rollback Java:
+                resource_id="abc-123-def"
+                config='{"java_action": "upgrade", "target_version": "17"}'
+                config='{"java_action": "rollback"}'
+
+            create_installer_token - Create installer token:
+                config='{"install_type": "ATOM", "duration_minutes": 120}'
+
+        Runtime types: ATOM, MOLECULE, CLOUD, GATEWAY
+        Install types: ATOM, MOLECULE, CLOUD, BROKER, GATEWAY
+        Java versions: 8, 11, 17, 21
+
+        Returns:
+            Action result with success status and data/error
+        """
+        # Parse config JSON
+        config_data = {}
+        if config:
+            try:
+                config_data = json.loads(config)
+            except (json.JSONDecodeError, TypeError) as e:
+                return {"_success": False, "error": f"Invalid config (must be a JSON string): {e}"}
+            if not isinstance(config_data, dict):
+                return {"_success": False, "error": "config must be a JSON object, not " + type(config_data).__name__}
+
+        try:
+            subject = get_current_user()
+            print(f"[INFO] manage_runtimes called by user: {subject}, profile: {profile}, action: {action}")
+
+            creds = get_secret(subject, profile)
+
+            sdk_params = {
+                "account_id": creds["account_id"],
+                "username": creds["username"],
+                "password": creds["password"],
+                "timeout": 30000,
+            }
+            if creds.get("base_url"):
+                sdk_params["base_url"] = creds["base_url"]
+            sdk = Boomi(**sdk_params)
+
+            params = {}
+            if resource_id:
+                params["resource_id"] = resource_id
+            if environment_id:
+                params["environment_id"] = environment_id
+
+            return manage_runtimes_action(sdk, profile, action, config_data=config_data, **params)
+
+        except Exception as e:
+            print(f"[ERROR] Failed to {action} manage_runtimes: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"_success": False, "error": str(e), "exception_type": type(e).__name__}
+
+    print("[INFO] Runtime management tool registered successfully (1 consolidated tool)")
+
+
 # --- Credential Management Tools (local dev only) ---
 if LOCAL_MODE:
     @mcp.tool()
@@ -2227,6 +2347,11 @@ if __name__ == "__main__":
             print("\n  Platform Monitoring:")
             print("  monitor_platform - Logs, artifacts, audit trail, and events")
             print("    Actions: execution_logs, execution_artifacts, audit_logs, events")
+        if manage_runtimes_action:
+            print("\n  Runtime Management:")
+            print("  manage_runtimes - Manage runtimes, attachments, restart, Java, tokens")
+            print("    Actions: list, get, update, delete, attach, detach, list_attachments,")
+            print("             restart, configure_java, create_installer_token")
         if invoke_api:
             print("\n  Generic API Access:")
             print("  invoke_boomi_api - Direct access to any Boomi REST API endpoint")
