@@ -59,13 +59,20 @@ JAVA_VERSIONS = {
 # Helpers
 # ============================================================================
 
+def _enum_str(val) -> str:
+    """Extract plain string from a value that may be an enum."""
+    if hasattr(val, 'value'):
+        return str(val.value)
+    return str(val) if val else ''
+
+
 def _runtime_to_dict(runtime) -> Dict[str, Any]:
     """Convert SDK Atom object to plain dict."""
     result = {
         "id": getattr(runtime, 'id_', ''),
         "name": getattr(runtime, 'name', ''),
-        "type": getattr(runtime, 'type_', ''),
-        "status": getattr(runtime, 'status', ''),
+        "type": _enum_str(getattr(runtime, 'type_', '')),
+        "status": _enum_str(getattr(runtime, 'status', '')),
     }
     # Include optional fields only when present
     for sdk_attr, dict_key in [
@@ -82,7 +89,10 @@ def _runtime_to_dict(runtime) -> Dict[str, Any]:
 
     capabilities = getattr(runtime, 'capabilities', None)
     if capabilities:
-        result['capabilities'] = capabilities
+        if isinstance(capabilities, list):
+            result['capabilities'] = [str(c) for c in capabilities]
+        else:
+            result['capabilities'] = [str(capabilities)]
 
     return result
 
@@ -521,7 +531,7 @@ def _action_create_installer_token(sdk: Boomi, profile: str, **kwargs) -> Dict[s
     if hasattr(result, 'token'):
         token_data = {
             "token": getattr(result, 'token', ''),
-            "install_type": str(getattr(result, 'install_type', install_type)),
+            "install_type": _enum_str(getattr(result, 'install_type', install_type)),
             "account_id": getattr(result, 'account_id', ''),
             "created": str(getattr(result, 'created', '')),
             "expiration": str(getattr(result, 'expiration', '')),
