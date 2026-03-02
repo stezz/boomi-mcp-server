@@ -90,9 +90,9 @@ def _runtime_to_dict(runtime) -> Dict[str, Any]:
     capabilities = getattr(runtime, 'capabilities', None)
     if capabilities:
         if isinstance(capabilities, list):
-            result['capabilities'] = [str(c) for c in capabilities]
+            result['capabilities'] = [_enum_str(c) for c in capabilities]
         else:
-            result['capabilities'] = [str(capabilities)]
+            result['capabilities'] = [_enum_str(capabilities)]
 
     return result
 
