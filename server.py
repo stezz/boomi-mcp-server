@@ -1802,8 +1802,8 @@ if manage_runtimes_action:
 
         Args:
             profile: Boomi profile name (required)
-            action: One of: list, get, update, delete, attach, detach, list_attachments, restart, configure_java, create_installer_token
-            resource_id: Runtime ID (most actions) or attachment ID (detach)
+            action: One of: list, get, create, update, delete, attach, detach, list_attachments, restart, configure_java, create_installer_token, available_clouds, cloud_list, cloud_get, cloud_create, cloud_update, cloud_delete
+            resource_id: Runtime ID (most actions) or attachment ID (detach) or cloud ID (cloud_get, cloud_update, cloud_delete)
             environment_id: Environment ID (for attach, detach, list_attachments)
             config: JSON string with action-specific parameters
 
@@ -1816,6 +1816,12 @@ if manage_runtimes_action:
 
             get - Get runtime by ID (no config needed):
                 resource_id="abc-123-def"
+
+            create - Create a cloud attachment (requires cloud_id):
+                config='{"name": "My Cloud Atom", "cloud_id": "abc-123-def"}'
+                Optional: purge_history_days, force_restart_time
+                Use available_clouds to find Boomi-managed cloud IDs, or cloud_list for private clouds.
+                Note: Local atoms cannot be created via API — use create_installer_token instead.
 
             update - Update runtime name:
                 resource_id="abc-123-def"
@@ -1847,11 +1853,35 @@ if manage_runtimes_action:
                 config='{"java_action": "upgrade", "target_version": "17"}'
                 config='{"java_action": "rollback"}'
 
-            create_installer_token - Create installer token:
+            create_installer_token - Create installer token for local runtime:
                 config='{"install_type": "ATOM", "duration_minutes": 120}'
+
+            available_clouds - List Boomi-managed public clouds (PCS/DCS/MCS) your account can attach to:
+                (no config needed - lists all available clouds)
+                config='{"name_pattern": "%US%"}'
+                Use these cloud IDs with action='create' to create cloud attachments.
+
+            cloud_list - List private runtime clouds your account owns (requires Cloud Management privilege):
+                config='{"classification": "PROD"}'
+                For accounts that manage their own runtime clouds (enterprise feature).
+
+            cloud_get - Get private runtime cloud by ID:
+                resource_id="abc-123-def"
+
+            cloud_create - Create private runtime cloud:
+                config='{"name": "My Cloud", "classification": "PROD"}'
+                config='{"name": "Test Cloud", "classification": "TEST", "allow_deployments": true, "allow_browsing": true, "allow_test_executions": true}'
+
+            cloud_update - Update private runtime cloud:
+                resource_id="abc-123-def"
+                config='{"name": "Renamed Cloud", "allow_deployments": false}'
+
+            cloud_delete - Delete private runtime cloud (permanent!):
+                resource_id="abc-123-def"
 
         Runtime types: ATOM, MOLECULE, CLOUD
         Install types: ATOM, MOLECULE, CLOUD, BROKER, GATEWAY
+        Cloud classifications: PROD, TEST (immutable after creation)
         Java versions: 8, 11, 17, 21
 
         Returns:

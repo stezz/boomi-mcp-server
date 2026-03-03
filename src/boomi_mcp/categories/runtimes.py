@@ -1,9 +1,10 @@
 """
 Runtime Management MCP Tools for Boomi Platform.
 
-Provides 10 runtime management actions:
+Provides 17 runtime management actions:
 - list: List runtimes with optional type/status/name filters
 - get: Get single runtime details
+- create: Create a cloud attachment (requires cloud_id from available_clouds or cloud_list)
 - update: Update runtime name
 - delete: Delete runtime (permanent)
 - attach: Attach runtime to environment
@@ -12,6 +13,12 @@ Provides 10 runtime management actions:
 - restart: Restart runtime
 - configure_java: Upgrade or rollback Java version
 - create_installer_token: Create installer token for new runtime installation
+- available_clouds: List Boomi-managed public clouds (PCS/DCS/MCS) your account can use for cloud attachments
+- cloud_list: List private runtime clouds your account owns (requires Cloud Management privilege)
+- cloud_get: Get private runtime cloud details
+- cloud_create: Create private runtime cloud (PROD or TEST)
+- cloud_update: Update private runtime cloud settings
+- cloud_delete: Delete private runtime cloud
 """
 
 from typing import Dict, Any, Optional, List
@@ -25,6 +32,11 @@ from boomi.models import (
     AtomSimpleExpression,
     AtomSimpleExpressionOperator,
     AtomSimpleExpressionProperty,
+    CloudQueryConfig,
+    CloudQueryConfigQueryFilter,
+    CloudSimpleExpression,
+    CloudSimpleExpressionOperator,
+    CloudSimpleExpressionProperty,
     EnvironmentAtomAttachment,
     EnvironmentAtomAttachmentQueryConfig,
     EnvironmentAtomAttachmentQueryConfigQueryFilter,
@@ -36,6 +48,12 @@ from boomi.models import (
     JavaRollback,
     InstallerToken,
     InstallType,
+    RuntimeCloud,
+    RuntimeCloudQueryConfig,
+    RuntimeCloudQueryConfigQueryFilter,
+    RuntimeCloudSimpleExpression,
+    RuntimeCloudSimpleExpressionOperator,
+    RuntimeCloudSimpleExpressionProperty,
 )
 
 
@@ -46,6 +64,7 @@ from boomi.models import (
 VALID_RUNTIME_TYPES = {"ATOM", "MOLECULE", "CLOUD"}
 VALID_STATUSES = {"ONLINE", "OFFLINE"}
 VALID_INSTALL_TYPES = {"ATOM", "MOLECULE", "CLOUD", "BROKER", "GATEWAY"}
+VALID_CLASSIFICATIONS = {"PROD", "TEST"}
 
 JAVA_VERSIONS = {
     '8': '1.8.0',
@@ -66,6 +85,23 @@ def _enum_str(val) -> str:
     return str(val) if val else ''
 
 
+def _parse_bool(val) -> bool:
+    """Parse a boolean value, handling string inputs correctly."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.lower() in ("true", "1", "yes")
+    return bool(val)
+
+
+def _parse_int(val, field_name: str) -> tuple:
+    """Parse an integer value with validation. Returns (value, error_string)."""
+    try:
+        return int(val), None
+    except (TypeError, ValueError):
+        return None, f"config.{field_name} must be a number, got: {val!r}"
+
+
 def _runtime_to_dict(runtime) -> Dict[str, Any]:
     """Convert SDK Atom object to plain dict."""
     result = {
@@ -74,18 +110,34 @@ def _runtime_to_dict(runtime) -> Dict[str, Any]:
         "type": _enum_str(getattr(runtime, 'type_', '')),
         "status": _enum_str(getattr(runtime, 'status', '')),
     }
-    # Include optional fields only when present
+    # Include optional string fields only when present
     for sdk_attr, dict_key in [
         ('host_name', 'hostname'),
         ('current_version', 'version'),
         ('date_installed', 'date_installed'),
-        ('date_created', 'date_created'),
         ('created_by', 'created_by'),
-        ('description', 'description'),
+        ('cloud_id', 'cloud_id'),
+        ('cloud_name', 'cloud_name'),
+        ('cloud_molecule_id', 'cloud_molecule_id'),
+        ('cloud_molecule_name', 'cloud_molecule_name'),
+        ('cloud_owner_name', 'cloud_owner_name'),
+        ('instance_id', 'instance_id'),
+        ('status_detail', 'status_detail'),
     ]:
         val = getattr(runtime, sdk_attr, None)
         if val and str(val) != 'N/A':
             result[dict_key] = str(val)
+
+    # Bool/int fields need explicit None check (0/False are valid values)
+    for sdk_attr, dict_key in [
+        ('is_cloud_attachment', 'is_cloud_attachment'),
+        ('purge_history_days', 'purge_history_days'),
+        ('purge_immediate', 'purge_immediate'),
+        ('force_restart_time', 'force_restart_time'),
+    ]:
+        val = getattr(runtime, sdk_attr, None)
+        if val is not None:
+            result[dict_key] = val
 
     capabilities = getattr(runtime, 'capabilities', None)
     if capabilities:
@@ -571,6 +623,347 @@ def _action_create_installer_token(sdk: Boomi, profile: str, **kwargs) -> Dict[s
     }
 
 
+def _action_create(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Create a cloud attachment on a Boomi-managed or private runtime cloud.
+
+    Requires cloud_id — use available_clouds to find Boomi-managed cloud IDs,
+    or cloud_list for private runtime cloud IDs.
+
+    Note: Local atoms cannot be created via API. Use create_installer_token
+    to get a token, then install the runtime manually.
+    """
+    name = kwargs.get("name")
+    cloud_id = kwargs.get("cloud_id")
+
+    if not name:
+        return {"_success": False, "error": "config.name is required for 'create' action"}
+
+    if not cloud_id:
+        return {
+            "_success": False,
+            "error": "config.cloud_id is required for 'create' action. "
+                     "The Atom CREATE API only creates cloud attachments. "
+                     "Use action='available_clouds' to find Boomi-managed cloud IDs, "
+                     "or action='cloud_list' for private runtime cloud IDs. "
+                     "For local atoms, use action='create_installer_token' instead.",
+        }
+
+    atom_kwargs = {"name": name, "cloud_id": cloud_id}
+
+    for key in ("purge_history_days", "force_restart_time"):
+        val = kwargs.get(key)
+        if val is not None:
+            parsed, err = _parse_int(val, key)
+            if err:
+                return {"_success": False, "error": err}
+            atom_kwargs[key] = parsed
+
+    atom_request = Atom(**atom_kwargs)
+    try:
+        result = sdk.atom.create_atom(request_body=atom_request)
+    except ApiError as e:
+        msg = _extract_api_error_msg(e)
+        return {
+            "_success": False,
+            "error": f"{msg} Use action='available_clouds' to find Boomi-managed cloud IDs, "
+                     f"or action='cloud_list' for private runtime cloud IDs.",
+        }
+
+    return {
+        "_success": True,
+        "runtime": _runtime_to_dict(result),
+        "note": "Cloud attachment created successfully.",
+    }
+
+
+def _action_available_clouds(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """List Boomi-managed clouds available for cloud atom creation."""
+    name_pattern = kwargs.get("name_pattern")
+
+    if name_pattern:
+        clean = name_pattern.strip("%")
+        expression = CloudSimpleExpression(
+            operator=CloudSimpleExpressionOperator.CONTAINS,
+            property=CloudSimpleExpressionProperty.NAME,
+            argument=[clean],
+        )
+    else:
+        expression = CloudSimpleExpression(
+            operator=CloudSimpleExpressionOperator.CONTAINS,
+            property=CloudSimpleExpressionProperty.NAME,
+            argument=[""],
+        )
+
+    query_filter = CloudQueryConfigQueryFilter(expression=expression)
+    query_config = CloudQueryConfig(query_filter=query_filter)
+    result = sdk.cloud.query_cloud(request_body=query_config)
+
+    clouds = []
+    def _parse_clouds(res):
+        if hasattr(res, 'result') and res.result:
+            items = res.result if isinstance(res.result, list) else [res.result]
+            for c in items:
+                cloud_dict = {
+                    "id": getattr(c, 'id_', ''),
+                    "name": getattr(c, 'name', ''),
+                }
+                atoms = getattr(c, 'atom', None)
+                if atoms:
+                    atom_list = atoms if isinstance(atoms, list) else [atoms]
+                    cloud_dict["atoms"] = [
+                        {"atom_id": getattr(a, 'atom_id', ''), "deleted": getattr(a, 'deleted', False)}
+                        for a in atom_list
+                    ]
+                clouds.append(cloud_dict)
+
+    _parse_clouds(result)
+    while hasattr(result, 'query_token') and result.query_token:
+        result = sdk.cloud.query_more_cloud(request_body=result.query_token)
+        _parse_clouds(result)
+
+    if not clouds:
+        return {
+            "_success": True,
+            "clouds": [],
+            "total_count": 0,
+            "hint": "No Boomi-managed public clouds found. "
+                    "If your account uses partner or test clouds, "
+                    "use action='get' on an existing runtime to find its cloud_id, "
+                    "or action='cloud_list' for private runtime clouds.",
+        }
+
+    return {
+        "_success": True,
+        "clouds": clouds,
+        "total_count": len(clouds),
+        "hint": "Use a cloud 'id' as cloud_id in action='create' to create a cloud attachment. "
+                "These are Boomi-managed public clouds (PCS/DCS/MCS). "
+                "For private runtime clouds, use action='cloud_list' instead.",
+    }
+
+
+# ============================================================================
+# RuntimeCloud Helpers & Actions
+# ============================================================================
+
+def _cloud_to_dict(cloud) -> Dict[str, Any]:
+    """Convert SDK RuntimeCloud object to plain dict."""
+    result = {
+        "id": getattr(cloud, 'id_', ''),
+        "name": getattr(cloud, 'name', ''),
+        "classification": getattr(cloud, 'classification', ''),
+    }
+    for sdk_attr, dict_key in [
+        ('allow_deployments', 'allow_deployments'),
+        ('allow_browsing', 'allow_browsing'),
+        ('allow_test_executions', 'allow_test_executions'),
+        ('max_attachments_per_account', 'max_attachments_per_account'),
+        ('created_by', 'created_by'),
+        ('created_date', 'created_date'),
+        ('modified_by', 'modified_by'),
+        ('modified_date', 'modified_date'),
+    ]:
+        val = getattr(cloud, sdk_attr, None)
+        if val is not None:
+            result[dict_key] = val if isinstance(val, (bool, int)) else str(val)
+    return result
+
+
+def _query_all_clouds(sdk: Boomi, expression=None) -> List[Dict[str, Any]]:
+    """Execute query_runtime_cloud with pagination, return list of dicts."""
+    query_filter = RuntimeCloudQueryConfigQueryFilter(expression=expression)
+    query_config = RuntimeCloudQueryConfig(query_filter=query_filter)
+
+    result = sdk.runtime_cloud.query_runtime_cloud(request_body=query_config)
+
+    clouds = []
+    if hasattr(result, 'result') and result.result:
+        items = result.result if isinstance(result.result, list) else [result.result]
+        clouds.extend([_cloud_to_dict(c) for c in items])
+
+    while hasattr(result, 'query_token') and result.query_token:
+        result = sdk.runtime_cloud.query_more_runtime_cloud(request_body=result.query_token)
+        if hasattr(result, 'result') and result.result:
+            items = result.result if isinstance(result.result, list) else [result.result]
+            clouds.extend([_cloud_to_dict(c) for c in items])
+
+    return clouds
+
+
+def _action_cloud_list(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """List private runtime clouds with optional classification filter."""
+    classification = kwargs.get("classification")
+
+    if classification:
+        upper = classification.upper()
+        if upper not in VALID_CLASSIFICATIONS:
+            return {
+                "_success": False,
+                "error": f"Invalid classification: '{classification}'. "
+                         f"Valid values: {', '.join(sorted(VALID_CLASSIFICATIONS))}",
+            }
+        expression = RuntimeCloudSimpleExpression(
+            operator=RuntimeCloudSimpleExpressionOperator.EQUALS,
+            property=RuntimeCloudSimpleExpressionProperty.CLASSIFICATION,
+            argument=[upper],
+        )
+    else:
+        # List all: use CONTAINS with empty string on name
+        expression = RuntimeCloudSimpleExpression(
+            operator=RuntimeCloudSimpleExpressionOperator.CONTAINS,
+            property=RuntimeCloudSimpleExpressionProperty.NAME,
+            argument=[""],
+        )
+
+    clouds = _query_all_clouds(sdk, expression)
+
+    return {
+        "_success": True,
+        "clouds": clouds,
+        "total_count": len(clouds),
+    }
+
+
+def _action_cloud_get(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Get a single private runtime cloud by ID."""
+    resource_id = kwargs.get("resource_id")
+    if not resource_id:
+        return {"_success": False, "error": "resource_id is required for 'cloud_get' action"}
+
+    cloud = sdk.runtime_cloud.get_runtime_cloud(id_=resource_id)
+    return {
+        "_success": True,
+        "cloud": _cloud_to_dict(cloud),
+    }
+
+
+def _action_cloud_create(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Create a private runtime cloud."""
+    name = kwargs.get("name")
+    classification = kwargs.get("classification")
+
+    if not name:
+        return {"_success": False, "error": "config.name is required for 'cloud_create' action"}
+    if not classification:
+        return {
+            "_success": False,
+            "error": "config.classification is required for 'cloud_create' action (PROD or TEST)",
+        }
+
+    upper = classification.upper()
+    if upper not in VALID_CLASSIFICATIONS:
+        return {
+            "_success": False,
+            "error": f"Invalid classification: '{classification}'. "
+                     f"Valid values: {', '.join(sorted(VALID_CLASSIFICATIONS))}",
+        }
+
+    cloud_kwargs = {"name": name, "classification": upper}
+    for key in ("allow_deployments", "allow_browsing", "allow_test_executions"):
+        val = kwargs.get(key)
+        if val is not None:
+            cloud_kwargs[key] = _parse_bool(val)
+    max_attach = kwargs.get("max_attachments_per_account")
+    if max_attach is not None:
+        parsed, err = _parse_int(max_attach, "max_attachments_per_account")
+        if err:
+            return {"_success": False, "error": err}
+        cloud_kwargs["max_attachments_per_account"] = parsed
+
+    cloud_request = RuntimeCloud(**cloud_kwargs)
+    result = sdk.runtime_cloud.create_runtime_cloud(request_body=cloud_request)
+
+    return {
+        "_success": True,
+        "cloud": _cloud_to_dict(result),
+    }
+
+
+def _action_cloud_update(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Update a private runtime cloud (name, permissions, max attachments)."""
+    resource_id = kwargs.get("resource_id")
+    if not resource_id:
+        return {"_success": False, "error": "resource_id is required for 'cloud_update' action"}
+
+    # GET current cloud to preserve required fields
+    current = sdk.runtime_cloud.get_runtime_cloud(id_=resource_id)
+
+    update_kwargs = {
+        "name": kwargs.get("name", getattr(current, 'name', '')),
+        "classification": getattr(current, 'classification', 'PROD'),
+    }
+    for key in ("allow_deployments", "allow_browsing", "allow_test_executions"):
+        val = kwargs.get(key)
+        if val is not None:
+            update_kwargs[key] = _parse_bool(val)
+        else:
+            existing = getattr(current, key, None)
+            if existing is not None:
+                update_kwargs[key] = existing
+    max_attach = kwargs.get("max_attachments_per_account")
+    if max_attach is not None:
+        parsed, err = _parse_int(max_attach, "max_attachments_per_account")
+        if err:
+            return {"_success": False, "error": err}
+        update_kwargs["max_attachments_per_account"] = parsed
+    else:
+        existing = getattr(current, 'max_attachments_per_account', None)
+        if existing is not None:
+            update_kwargs["max_attachments_per_account"] = existing
+
+    cloud_update = RuntimeCloud(**update_kwargs)
+    result = sdk.runtime_cloud.update_runtime_cloud(id_=resource_id, request_body=cloud_update)
+
+    return {
+        "_success": True,
+        "cloud": _cloud_to_dict(result),
+    }
+
+
+def _action_cloud_delete(sdk: Boomi, profile: str, **kwargs) -> Dict[str, Any]:
+    """Delete a private runtime cloud (permanent)."""
+    resource_id = kwargs.get("resource_id")
+    if not resource_id:
+        return {"_success": False, "error": "resource_id is required for 'cloud_delete' action"}
+
+    # Get info first for the response
+    try:
+        cloud = sdk.runtime_cloud.get_runtime_cloud(id_=resource_id)
+        cloud_dict = _cloud_to_dict(cloud)
+    except Exception:
+        cloud_dict = {"id": resource_id}
+
+    sdk.runtime_cloud.delete_runtime_cloud(id_=resource_id)
+
+    return {
+        "_success": True,
+        "deleted_cloud": cloud_dict,
+        "warning": "Private runtime cloud deletion is permanent and cannot be undone.",
+    }
+
+
+# ============================================================================
+# Error Helpers
+# ============================================================================
+
+def _extract_api_error_msg(e: ApiError) -> str:
+    """Extract user-friendly error message from ApiError."""
+    # 1. SDK's pre-parsed XML error detail
+    detail = getattr(e, 'error_detail', None)
+    if detail:
+        return detail
+    # 2. JSON response body with "message" key
+    resp = getattr(e, 'response', None)
+    if resp:
+        body = getattr(resp, 'body', None)
+        if isinstance(body, dict):
+            msg = body.get("message", "")
+            if msg:
+                return msg
+    # 3. Fallback to ApiError.message (contains URL + status)
+    return getattr(e, 'message', '') or str(e)
+
+
 # ============================================================================
 # Action Router
 # ============================================================================
@@ -592,6 +985,7 @@ def manage_runtimes_action(
     actions = {
         "list": _action_list,
         "get": _action_get,
+        "create": _action_create,
         "update": _action_update,
         "delete": _action_delete,
         "attach": _action_attach,
@@ -600,6 +994,12 @@ def manage_runtimes_action(
         "restart": _action_restart,
         "configure_java": _action_configure_java,
         "create_installer_token": _action_create_installer_token,
+        "available_clouds": _action_available_clouds,
+        "cloud_list": _action_cloud_list,
+        "cloud_get": _action_cloud_get,
+        "cloud_create": _action_cloud_create,
+        "cloud_update": _action_cloud_update,
+        "cloud_delete": _action_cloud_delete,
     }
 
     handler = actions.get(action)
@@ -612,6 +1012,12 @@ def manage_runtimes_action(
 
     try:
         return handler(sdk, profile, **merged)
+    except ApiError as e:
+        return {
+            "_success": False,
+            "error": f"Action '{action}' failed: {_extract_api_error_msg(e)}",
+            "exception_type": "ApiError",
+        }
     except Exception as e:
         return {
             "_success": False,
