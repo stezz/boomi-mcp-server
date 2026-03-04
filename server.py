@@ -1869,7 +1869,7 @@ def delete_boomi_profile(profile: str):
         }
 
 
-if __name__ == "__main__":
+def main():
     print("\n" + "=" * 60)
     print("Boomi MCP Server")
     print("=" * 60)
@@ -1919,3 +1919,7 @@ if __name__ == "__main__":
     print("=" * 60 + "\n")
 
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
