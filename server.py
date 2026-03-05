@@ -1870,6 +1870,22 @@ def delete_boomi_profile(profile: str):
 
 
 def main():
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print("Boomi MCP Server - Local MCP server for Boomi platform management")
+        print()
+        print("Usage: boomi-mcp-server [options]")
+        print()
+        print("Options:")
+        print("  -h, --help    Show this help message and exit")
+        print()
+        print("Environment variables:")
+        print("  BOOMI_ACCOUNT_ID   Boomi account ID")
+        print("  BOOMI_USERNAME     API username (e.g. BOOMI_TOKEN.user@example.com)")
+        print("  BOOMI_TOKEN        API token")
+        print("  BOOMI_PROFILE      Profile name (default: 'default')")
+        print("  BOOMI_BASE_URL     Custom API base URL (optional)")
+        return
+
     print("\n" + "=" * 60)
     print("Boomi MCP Server")
     print("=" * 60)
